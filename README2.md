@@ -18,28 +18,36 @@ An advanced autonomous AI assistant designed to interpret goals, build plans, ro
 - Safe-by-default shell and filesystem tools
 - Pluggable OpenAI-compatible and Anthropic model providers
 
-## Quick Start
+## Bootstrap
 
-1. Create a virtual environment and install the package:
+For the most reliable Windows setup on this machine, use the one-command bootstrap:
 
 ```powershell
-python -m venv .venv
-.venv\Scripts\Activate.ps1
-pip install -e .
+powershell -ExecutionPolicy Bypass -File .\bootstrap.ps1
 ```
 
-2. Copy `.env.example` to `.env` and add any API keys you want to use.
+That command creates or repairs `.venv`, reinstalls the project in editable mode, creates `.env` from `.env.example` if needed, and verifies the package import.
+
+## Quick Start
+
+1. Bootstrap the environment:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\bootstrap.ps1
+```
+
+2. If you want external providers, open `.env` and add any API keys you want to use.
 
 3. Run the assistant:
 
 ```powershell
-autonomous-assistant run "Research the best open-source vector databases and summarize the tradeoffs"
+.\.venv\Scripts\autonomous-assistant run "Research the best open-source vector databases and summarize the tradeoffs"
 ```
 
 4. Or start the API server:
 
 ```powershell
-autonomous-assistant serve --host 127.0.0.1 --port 8000
+.\.venv\Scripts\autonomous-assistant serve --host 127.0.0.1 --port 8000
 ```
 
 ## Ollama Local Mode
@@ -60,9 +68,9 @@ This mode reduces repeated planner and evaluator model calls and favors a single
 ## Example CLI Commands
 
 ```powershell
-autonomous-assistant capabilities
-autonomous-assistant run "Inspect this project and propose a release plan"
-autonomous-assistant run "Search the web for Python 3.14 changes and save a summary in notes/py314.md"
+.\.venv\Scripts\autonomous-assistant capabilities
+.\.venv\Scripts\autonomous-assistant run "Inspect this project and propose a release plan"
+.\.venv\Scripts\autonomous-assistant run "Search the web for Python 3.14 changes and save a summary in notes/py314.md"
 ```
 
 ## API
