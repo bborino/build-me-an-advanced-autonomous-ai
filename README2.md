@@ -42,6 +42,21 @@ autonomous-assistant run "Research the best open-source vector databases and sum
 autonomous-assistant serve --host 127.0.0.1 --port 8000
 ```
 
+## Ollama Local Mode
+
+If you are running the assistant on a smaller local Ollama model, set the project to local-fast execution mode:
+
+```env
+ASSISTANT_EXECUTION_PROFILE=local_fast
+OPENAI_API_KEY=ollama
+OPENAI_BASE_URL=http://localhost:11434/v1
+OPENAI_REASONING_MODEL=llama3.2:1b
+OPENAI_CODE_MODEL=llama3.2:1b
+OPENAI_SYNTHESIS_MODEL=llama3.2:1b
+```
+
+This mode reduces repeated planner and evaluator model calls and favors a single focused answer-generation step, which is much more practical on low-RAM local models.
+
 ## Example CLI Commands
 
 ```powershell
@@ -105,4 +120,3 @@ Core modules:
 
 - The assistant works without API keys using heuristic fallbacks, but model-backed planning and tool selection become much stronger once you configure providers.
 - Web search uses Brave Search when `BRAVE_SEARCH_API_KEY` is present, otherwise it falls back to DuckDuckGo HTML parsing and Wikipedia search.
-

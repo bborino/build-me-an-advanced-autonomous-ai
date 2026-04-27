@@ -28,12 +28,16 @@ class AutonomousAssistant:
         self.models = ModelRegistry(self.settings)
         self.router = ModelRouter(self.models)
         self.tools: ToolRegistry = create_default_tool_registry(self.settings)
-        self.reasoning = ReasoningEngine(self.models, self.router)
+        self.reasoning = ReasoningEngine(self.models, self.router, self.settings)
 
     def capabilities(self) -> dict[str, Any]:
         return {
             "tools": [spec.model_dump() for spec in self.tools.specs()],
             "models": [profile.model_dump() for profile in self.models.list_profiles()],
+            "runtime": {
+                "execution_profile": self.settings.execution_profile,
+                "local_fast_path": self.settings.use_local_fast_path(),
+            },
             "safety": {
                 "shell_destructive_commands_blocked": True,
                 "sensitive_shell_changes_require_confirmation": True,
@@ -169,7 +173,7 @@ class AutonomousAssistant:
         completion_note = ""
 
         for _ in range(self.settings.max_tool_steps_per_task):
-            relevant_memory = self.memory.search(session_id, task.title, limit=6)
+            relevant_memory = self.memory.recent_notes(session_id, limit=12)
             decision, model = self.reasoning.next_action(
                 goal=goal,
                 task=task,

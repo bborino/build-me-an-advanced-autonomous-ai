@@ -45,6 +45,7 @@ class AssistantSettings(BaseModel):
     data_dir: Path
     memory_db_path: Path
 
+    execution_profile: str = "auto"
     max_iterations: int = 8
     max_task_attempts: int = 2
     max_tool_steps_per_task: int = 4
@@ -53,6 +54,7 @@ class AssistantSettings(BaseModel):
     shell_timeout_seconds: int = 30
     http_timeout_seconds: float = 30.0
     provider_timeout_seconds: float = 60.0
+    local_model_max_tokens: int = 450
     shell_enabled: bool = True
 
     openai_api_key: str | None = None
@@ -85,6 +87,7 @@ class AssistantSettings(BaseModel):
             workspace_root=root,
             data_dir=data_dir,
             memory_db_path=memory_db_path,
+            execution_profile=(get("ASSISTANT_EXECUTION_PROFILE", "auto") or "auto").lower(),
             max_iterations=_to_int(get("ASSISTANT_MAX_ITERATIONS"), 8),
             max_task_attempts=_to_int(get("ASSISTANT_MAX_TASK_ATTEMPTS"), 2),
             max_tool_steps_per_task=_to_int(get("ASSISTANT_MAX_TOOL_STEPS"), 4),
@@ -94,6 +97,9 @@ class AssistantSettings(BaseModel):
             http_timeout_seconds=_to_float(get("ASSISTANT_HTTP_TIMEOUT"), 30.0),
             provider_timeout_seconds=_to_float(
                 get("ASSISTANT_PROVIDER_TIMEOUT"), 60.0
+            ),
+            local_model_max_tokens=_to_int(
+                get("ASSISTANT_LOCAL_MODEL_MAX_TOKENS"), 450
             ),
             shell_enabled=_to_bool(get("ASSISTANT_SHELL_ENABLED"), True),
             openai_api_key=get("OPENAI_API_KEY"),
@@ -127,3 +133,12 @@ class AssistantSettings(BaseModel):
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.memory_db_path.parent.mkdir(parents=True, exist_ok=True)
 
+    def use_local_fast_path(self) -> bool:
+        if self.execution_profile == "local_fast":
+            return True
+        if self.execution_profile == "balanced":
+            return False
+
+        base_url = self.openai_base_url.lower()
+        local_markers = ("localhost:11434", "127.0.0.1:11434", "0.0.0.0:11434")
+        return bool(self.openai_api_key) and any(marker in base_url for marker in local_markers)

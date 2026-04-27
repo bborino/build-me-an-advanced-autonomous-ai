@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from autonomous_assistant.config import AssistantSettings
 from autonomous_assistant.models import (
     CompletionRequest,
     EvaluationResult,
@@ -16,11 +17,20 @@ from autonomous_assistant.utils import extract_json_payload, make_task_id, trunc
 
 
 class ReasoningEngine:
-    def __init__(self, models: ModelRegistry, router: ModelRouter) -> None:
+    def __init__(
+        self,
+        models: ModelRegistry,
+        router: ModelRouter,
+        settings: AssistantSettings,
+    ) -> None:
         self.models = models
         self.router = router
+        self.settings = settings
 
     def interpret_goal(self, goal: str, memory_items: list[dict[str, Any]]) -> IntentProfile:
+        if self.settings.use_local_fast_path():
+            return self._heuristic_intent(goal)
+
         profile = self.router.select("planning")
         if profile:
             system = (
@@ -57,6 +67,9 @@ Return a JSON object with:
         intent: IntentProfile,
         tool_descriptions: list[dict[str, Any]],
     ) -> list[PlanTask]:
+        if self.settings.use_local_fast_path():
+            return self._lightweight_plan(goal, intent)
+
         profile = self.router.select("planning")
         if profile:
             system = (
@@ -106,6 +119,15 @@ Rules:
         relevant_memory: list[dict[str, Any]],
         tool_history: list[ToolResult],
     ) -> tuple[ToolDecision, ModelProfile | None]:
+        if self.settings.use_local_fast_path():
+            return self._local_fast_next_action(
+                goal=goal,
+                task=task,
+                plan=plan,
+                relevant_memory=relevant_memory,
+                tool_history=tool_history,
+            )
+
         attempt_index = max(task.attempts - 1, 0)
         profile = self.router.select("execution", task=task, attempt_index=attempt_index)
         if profile:
@@ -162,6 +184,9 @@ Rules:
         completion_note: str,
         tool_history: list[ToolResult],
     ) -> tuple[EvaluationResult, ModelProfile | None]:
+        if self.settings.use_local_fast_path():
+            return self._heuristic_evaluation(task, completion_note, tool_history), None
+
         attempt_index = max(task.attempts - 1, 0)
         profile = self.router.select("evaluation", task=task, attempt_index=attempt_index)
         if profile:
@@ -200,6 +225,12 @@ Return a JSON object with:
         plan: list[PlanTask],
         execution_notes: list[str],
     ) -> tuple[str, ModelProfile | None]:
+        if self.settings.use_local_fast_path():
+            final_task = self._select_primary_answer_task(plan)
+            if final_task and final_task.result_summary:
+                return final_task.result_summary, None
+            return self._heuristic_synthesis(goal, plan), None
+
         profile = self.router.select("synthesis")
         if profile:
             system = (
@@ -293,6 +324,52 @@ Return a concise final response for the user that focuses on results, notable bl
             preferred_output="concise structured executive summary",
         )
 
+    def _lightweight_plan(self, goal: str, intent: IntentProfile) -> list[PlanTask]:
+        lowered = goal.lower()
+        tasks: list[PlanTask] = []
+        next_priority = 1
+
+        if any(keyword in lowered for keyword in ["research", "search", "latest", "find", "compare"]):
+            tasks.append(
+                PlanTask(
+                    id=make_task_id(len(tasks)),
+                    title="Gather external context",
+                    description="Search the web for the most relevant public information.",
+                    priority=next_priority,
+                    preferred_modes=["web", "analysis"],
+                )
+            )
+            next_priority += 1
+
+        if any(keyword in lowered for keyword in ["repo", "repository", "workspace", "project", "codebase", "file"]):
+            tasks.append(
+                PlanTask(
+                    id=make_task_id(len(tasks)),
+                    title="Inspect workspace context",
+                    description="Collect the most relevant local files and repository context.",
+                    dependencies=[task.id for task in tasks],
+                    priority=next_priority,
+                    preferred_modes=["filesystem", "analysis", "code"],
+                )
+            )
+            next_priority += 1
+
+        preferred_modes = ["reasoning", "analysis"]
+        if any(keyword in lowered for keyword in ["build", "create", "design", "implement", "develop", "code"]):
+            preferred_modes.append("code")
+
+        tasks.append(
+            PlanTask(
+                id=make_task_id(len(tasks)),
+                title="Answer goal",
+                description="Produce the main answer or artifact using the available evidence.",
+                dependencies=[task.id for task in tasks],
+                priority=next_priority,
+                preferred_modes=preferred_modes,
+            )
+        )
+        return tasks
+
     def _heuristic_plan(self, goal: str, intent: IntentProfile) -> list[PlanTask]:
         lowered = goal.lower()
         tasks: list[PlanTask] = [
@@ -370,6 +447,190 @@ Return a concise final response for the user that focuses on results, notable bl
             )
         )
         return tasks
+
+    def _local_fast_next_action(
+        self,
+        goal: str,
+        task: PlanTask,
+        plan: list[PlanTask],
+        relevant_memory: list[dict[str, Any]],
+        tool_history: list[ToolResult],
+    ) -> tuple[ToolDecision, ModelProfile | None]:
+        task_text = f"{task.title} {task.description}".lower()
+
+        if not tool_history:
+            if "web" in task.preferred_modes:
+                return (
+                    ToolDecision(
+                        action="tool",
+                        working_summary="Collecting lightweight web context",
+                        tool_name="web_search",
+                        tool_input={"query": goal, "max_results": 4},
+                    ),
+                    None,
+                )
+
+            if "filesystem" in task.preferred_modes:
+                operation = "search" if any(
+                    keyword in goal.lower()
+                    for keyword in ["readme", "config", "router", "assistant", "file"]
+                ) else "list"
+                tool_input = (
+                    {"operation": "search", "path": ".", "query": "assistant", "limit": 12}
+                    if operation == "search"
+                    else {"operation": "list", "path": ".", "recursive": False, "limit": 40}
+                )
+                return (
+                    ToolDecision(
+                        action="tool",
+                        working_summary="Collecting lightweight workspace context",
+                        tool_name="filesystem",
+                        tool_input=tool_input,
+                    ),
+                    None,
+                )
+
+        if "answer goal" in task_text:
+            answer, profile = self._generate_local_fast_answer(
+                goal=goal,
+                task=task,
+                plan=plan,
+                relevant_memory=relevant_memory,
+                tool_history=tool_history,
+            )
+            return (
+                ToolDecision(
+                    action="complete",
+                    working_summary="Generating a direct answer with the local model",
+                    completion_note=answer,
+                ),
+                profile,
+            )
+
+        if tool_history and tool_history[-1].ok:
+            return (
+                ToolDecision(
+                    action="complete",
+                    working_summary="Summarizing collected context",
+                    completion_note=self._summarize_tool_history(tool_history),
+                ),
+                None,
+            )
+
+        return self._heuristic_next_action(goal, task, tool_history), None
+
+    def _generate_local_fast_answer(
+        self,
+        goal: str,
+        task: PlanTask,
+        plan: list[PlanTask],
+        relevant_memory: list[dict[str, Any]],
+        tool_history: list[ToolResult],
+    ) -> tuple[str, ModelProfile | None]:
+        profile = self.router.select("execution", task=task)
+        if not profile:
+            return self._fallback_answer(goal, task, tool_history), None
+
+        context_notes = self._format_local_fast_context(relevant_memory, tool_history)
+        system = (
+            "You are a concise local autonomous assistant running on a small model. "
+            "Give the best direct answer you can. Do not explain your chain-of-thought. "
+            "Use short sections or bullets only when they help clarity."
+        )
+        prompt = f"""
+User goal:
+{goal}
+
+Current task:
+{task.title}: {task.description}
+
+Available context:
+{context_notes}
+
+Instructions:
+- Produce the actual answer for the user, not a status update
+- Be concise and practical
+- If context is limited, say that briefly and still give the best answer you can
+"""
+        try:
+            result = self.models.complete(
+                profile,
+                CompletionRequest(
+                    system=system,
+                    prompt=prompt,
+                    response_format="text",
+                    max_tokens=self.settings.local_model_max_tokens,
+                ),
+            )
+            text = result.text.strip()
+            if text:
+                return text, profile
+        except Exception:
+            pass
+
+        return self._fallback_answer(goal, task, tool_history), None
+
+    @staticmethod
+    def _summarize_tool_history(tool_history: list[ToolResult]) -> str:
+        if not tool_history:
+            return "No supporting context was collected."
+        summaries = [truncate_text(result.summary, 220) for result in tool_history[-2:]]
+        return " ".join(summaries)
+
+    def _format_local_fast_context(
+        self,
+        relevant_memory: list[dict[str, Any]],
+        tool_history: list[ToolResult],
+    ) -> str:
+        lines: list[str] = []
+        for note in relevant_memory[-8:]:
+            content = truncate_text(note.get("content", ""), 260)
+            if content:
+                lines.append(f"- {note.get('kind', 'note')}: {content}")
+
+        for result in tool_history[-2:]:
+            lines.append(f"- tool:{result.tool_name}: {truncate_text(result.summary, 260)}")
+            if isinstance(result.content, dict):
+                if "results" in result.content:
+                    results = result.content.get("results", [])
+                    for item in results[:2]:
+                        lines.append(
+                            "- source: "
+                            f"{truncate_text(item.get('title', ''), 80)} | "
+                            f"{truncate_text(item.get('snippet', ''), 140)}"
+                        )
+                elif "text" in result.content:
+                    lines.append(f"- text: {truncate_text(result.content.get('text', ''), 220)}")
+                elif "matches" in result.content:
+                    for match in result.content.get("matches", [])[:4]:
+                        lines.append(
+                            "- file match: "
+                            f"{match.get('path')}:{match.get('line_number')} "
+                            f"{truncate_text(match.get('line', ''), 140)}"
+                        )
+                elif "entries" in result.content:
+                    entries = result.content.get("entries", [])[:6]
+                    lines.append(
+                        "- files: " + ", ".join(entry.get("path", "") for entry in entries if entry.get("path"))
+                    )
+
+        return "\n".join(lines) if lines else "- No extra context was collected."
+
+    @staticmethod
+    def _fallback_answer(goal: str, task: PlanTask, tool_history: list[ToolResult]) -> str:
+        if tool_history and tool_history[-1].ok:
+            return f"{task.title}: {truncate_text(tool_history[-1].summary, 500)}"
+        return f"Best-effort answer requested for: {goal}"
+
+    @staticmethod
+    def _select_primary_answer_task(plan: list[PlanTask]) -> PlanTask | None:
+        for task in plan:
+            if task.status.value == "completed" and "answer goal" in task.title.lower():
+                return task
+        completed = [task for task in plan if task.status.value == "completed" and task.result_summary]
+        if completed:
+            return completed[-1]
+        return None
 
     @staticmethod
     def _heuristic_next_action(
